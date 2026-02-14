@@ -8,8 +8,13 @@ WORKDIR /app
 
 # Copiar package.json y instalar dependencias
 COPY package*.json ./
-RUN npm install && \
-    npm run build
+RUN npm install
+
+# Copiar TODO el código fuente
+COPY . .
+
+# Compilar
+RUN npm run build
 
 # ============================================================
 #  ETAPA 2: Runtime
