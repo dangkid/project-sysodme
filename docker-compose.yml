@@ -27,47 +27,47 @@ services:
   #     Default login: admin@example.com / changeme
   #     (COMENTADO TEMPORALMENTE - usar imagen local si falla)
   # ==========================================================
-  # nginx-proxy-manager:
-  #   image: jc21/nginx-proxy-manager:latest
-  #   container_name: npm
-  #   restart: unless-stopped
-  #   ports:
-  #     - "80:80"       # HTTP público
-  #     - "443:443"     # HTTPS público
-  #     - "81:81"       # Panel de administración
-  #   volumes:
-  #     - ./docker_data/npm/data:/data
-  #     - ./docker_data/npm/letsencrypt:/etc/letsencrypt
-  #   networks:
-  #     - internal_network
-  #   logging: *default-logging
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         memory: 256M
-  #         cpus: "0.50"
-  #       reservations:
-  #         memory: 128M
-
-  # Nginx simple (mientras esperamos NPM)
-  nginx-simple:
-    image: nginx:alpine
-    container_name: nginx-simple
+  nginx-proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    container_name: npm
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "80:80"       # HTTP público
+      - "443:443"     # HTTPS público
+      - "81:81"       # Panel de administración
     volumes:
-      - ./docker_data/nginx:/etc/nginx/conf.d
+      - ./docker_data/npm/data:/data
+      - ./docker_data/npm/letsencrypt:/etc/letsencrypt
     networks:
       - internal_network
     logging: *default-logging
     deploy:
       resources:
         limits:
-          memory: 128M
-          cpus: "0.25"
+          memory: 256M
+          cpus: "0.50"
         reservations:
+          memory: 128M
+
+  # Nginx simple (mientras esperamos NPM)
+  # nginx-simple:
+  #   image: nginx:alpine
+  #   container_name: nginx-simple
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./docker_data/nginx:/etc/nginx/conf.d
+  #   networks:
+  #     - internal_network
+  #   logging: *default-logging
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 128M
+  #         cpus: "0.25"
+  #       reservations:
           memory: 64M
 
   # ==========================================================
