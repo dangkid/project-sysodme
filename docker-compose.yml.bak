@@ -163,6 +163,8 @@ services:
     restart: unless-stopped
     ports:
       - "3000:80"        # Nginx en puerto 3000 (NPM lo expondrá)
+    volumes:
+      - ./docker_data/web:/usr/share/nginx/html
     networks:
       - internal_network
     logging: *default-logging
