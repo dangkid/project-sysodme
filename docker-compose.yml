@@ -1,0 +1,315 @@
+# ============================================================
+#  ECOSISTEMA EMPRESARIAL UNIFICADO
+#  Stack: NPM · MariaDB · WordPress · Redis · Moodle · ToolJet
+#  Target: 4 vCPU | 8 GB RAM | 75 GB NVMe | Ubuntu 24.04
+# ============================================================
+#
+#  RAM total contenedores: ~5.2 GB (reserva ~2.7 GB para OS)
+#  Red: internal_network (solo NPM expone puertos)
+#  Datos: ./docker_data/<servicio> (backup fácil con tar/rsync)
+#
+#  Primer uso:
+#    docker compose up -d
+#    (NPM admin → http://<IP>:81  user: admin@example.com  pass: changeme)
+# ============================================================
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  # ==========================================================
+  #  1. PROXY INVERSO & SSL — Nginx Proxy Manager
+  #     Admin: http://<IP>:81
+  #     Default login: admin@example.com / changeme
+  # ==========================================================
+  nginx-proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    container_name: npm
+    restart: unless-stopped
+    ports:
+      - "80:80"       # HTTP público
+      - "443:443"     # HTTPS público
+      - "81:81"       # Panel de administración
+    volumes:
+      - ./docker_data/npm/data:/data
+      - ./docker_data/npm/letsencrypt:/etc/letsencrypt
+    networks:
+      - internal_network
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.50"
+        reservations:
+          memory: 128M
+
+  # ==========================================================
+  #  2. BASE DE DATOS CENTRAL — MariaDB 10.11
+  #     Esquemas: db_landing · db_learning · db_erp
+  #     init.sql se ejecuta solo en el PRIMER arranque
+  # ==========================================================
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - ./docker_data/mariadb:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    networks:
+      - internal_network
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    command: >-
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --innodb-buffer-pool-size=512M
+      --innodb-log-file-size=48M
+      --innodb-flush-log-at-trx-commit=2
+      --max-connections=100
+      --key-buffer-size=16M
+      --table-open-cache=256
+      --sort-buffer-size=1M
+      --read-buffer-size=1M
+      --query-cache-type=1
+      --query-cache-size=32M
+      --tmp-table-size=32M
+      --max-heap-table-size=32M
+      --slow-query-log=1
+      --long-query-time=2
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "1.00"
+        reservations:
+          memory: 512M
+
+  # ==========================================================
+  #  3. CACHÉ — Redis 7 (Alpine)
+  #     Usado por WordPress (plugin Redis Object Cache)
+  # ==========================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: >-
+      redis-server
+      --maxmemory 96mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --loglevel warning
+    volumes:
+      - ./docker_data/redis:/data
+    networks:
+      - internal_network
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+
+  # ==========================================================
+  #  4. SANA WEB (Landing) — WordPress
+  #     Proxy en NPM: www.sana.es → wordpress:80
+  #     Tras arrancar, instalar plugin "Redis Object Cache"
+  # ==========================================================
+  wordpress:
+    image: wordpress:latest
+    container_name: wordpress
+    restart: unless-stopped
+    environment:
+      WORDPRESS_DB_HOST: mariadb:3306
+      WORDPRESS_DB_NAME: db_landing
+      WORDPRESS_DB_USER: wp_user
+      WORDPRESS_DB_PASSWORD: ${WP_DB_PASSWORD}
+      WORDPRESS_TABLE_PREFIX: wp_
+      WORDPRESS_CONFIG_EXTRA: |
+        /* --- Redis Object Cache --- */
+        define('WP_REDIS_HOST', 'redis');
+        define('WP_REDIS_PORT', 6379);
+        define('WP_REDIS_DATABASE', 0);
+        /* --- Límites de memoria WP --- */
+        define('WP_MEMORY_LIMIT', '256M');
+        define('WP_MAX_MEMORY_LIMIT', '256M');
+        /* --- Seguridad --- */
+        define('DISALLOW_FILE_EDIT', true);
+    volumes:
+      - ./docker_data/wordpress:/var/www/html
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - internal_network
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.75"
+        reservations:
+          memory: 256M
+
+  # ==========================================================
+  #  5. SANA ACADEMY (LMS) — Moodle (Bitnami)
+  #     Proxy en NPM: academy.sana.es → moodle:8080
+  #     Primera carga tarda 3-5 min (instalación automática)
+  # ==========================================================
+  moodle:
+    image: bitnami/moodle:latest
+    container_name: moodle
+    restart: unless-stopped
+    environment:
+      # --- Conexión a BD ---
+      MOODLE_DATABASE_TYPE: mariadb
+      MOODLE_DATABASE_HOST: mariadb
+      MOODLE_DATABASE_PORT_NUMBER: "3306"
+      MOODLE_DATABASE_NAME: db_learning
+      MOODLE_DATABASE_USER: moodle_user
+      MOODLE_DATABASE_PASSWORD: ${MOODLE_DB_PASSWORD}
+      # --- Admin Moodle ---
+      MOODLE_USERNAME: ${MOODLE_ADMIN_USER}
+      MOODLE_PASSWORD: ${MOODLE_ADMIN_PASSWORD}
+      MOODLE_EMAIL: ${MOODLE_ADMIN_EMAIL}
+      MOODLE_SITE_NAME: "SANA Academy"
+      MOODLE_LANG: es
+      # --- PHP Tuning (CRÍTICO para rendimiento) ---
+      #     Ajusta PHP_MEMORY_LIMIT según carga; aquí 256M es
+      #     el límite POR PROCESO, no el total del contenedor.
+      PHP_MEMORY_LIMIT: "256M"
+      PHP_UPLOAD_MAX_FILESIZE: "100M"
+      PHP_POST_MAX_SIZE: "100M"
+      PHP_MAX_EXECUTION_TIME: "300"
+      PHP_MAX_INPUT_VARS: "5000"
+    volumes:
+      - ./docker_data/moodle:/bitnami/moodle
+      - ./docker_data/moodledata:/bitnami/moodledata
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - internal_network
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "1.00"
+        reservations:
+          memory: 512M
+
+  # ==========================================================
+  #  6. ERP — PostgreSQL 15 (Almacén interno de ToolJet)
+  #     No expone puertos; solo accesible desde internal_network
+  # ==========================================================
+  tooljet-db:
+    image: postgres:15-alpine
+    container_name: tooljet-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tooljet_production
+      POSTGRES_USER: tooljet
+      POSTGRES_PASSWORD: ${TOOLJET_PG_PASSWORD}
+    volumes:
+      - ./docker_data/tooljet-db:/var/lib/postgresql/data
+    networks:
+      - internal_network
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tooljet -d tooljet_production"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.25"
+        reservations:
+          memory: 128M
+
+  # ==========================================================
+  #  7. ERP & GESTIÓN — ToolJet CE
+  #     Proxy en NPM: erp.sana.es → tooljet:3000
+  #     Elegido sobre Appsmith: Node.js (~1 GB) vs Java (~2.5 GB)
+  #     Conecta a MariaDB (db_erp) como Data Source desde su UI
+  # ==========================================================
+  tooljet:
+    image: tooljet/tooljet-ce:latest
+    container_name: tooljet
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    environment:
+      # --- General ---
+      TOOLJET_HOST: ${TOOLJET_HOST}
+      SERVE_CLIENT: "true"
+      PORT: "3000"
+      NODE_ENV: production
+      # --- PostgreSQL (metadatos internos de ToolJet) ---
+      PG_HOST: tooljet-db
+      PG_PORT: "5432"
+      PG_DB: tooljet_production
+      PG_USER: tooljet
+      PG_PASS: ${TOOLJET_PG_PASSWORD}
+      # --- ToolJet DB feature ---
+      ENABLE_TOOLJET_DB: "true"
+      TOOLJET_DB_HOST: tooljet-db
+      TOOLJET_DB_PORT: "5432"
+      TOOLJET_DB: tooljet_production
+      TOOLJET_DB_USER: tooljet
+      TOOLJET_DB_PASS: ${TOOLJET_PG_PASSWORD}
+      # --- Seguridad ---
+      LOCKBOX_MASTER_KEY: ${TOOLJET_LOCKBOX_KEY}
+      SECRET_KEY_BASE: ${TOOLJET_SECRET_KEY}
+      # --- Node.js Heap: 768 MB (dentro del límite de 1 GB) ---
+      #     Ajustar si ves errores "JavaScript heap out of memory"
+      NODE_OPTIONS: "--max-old-space-size=768"
+      # --- Miscelánea ---
+      CHECK_FOR_UPDATES: "false"
+      COMMENT_FEATURE_ENABLE: "true"
+      ENABLE_MARKETPLACE_FEATURE: "true"
+    depends_on:
+      tooljet-db:
+        condition: service_healthy
+    networks:
+      - internal_network
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: "1.00"
+        reservations:
+          memory: 512M
+
+# ==============================================================
+#  RED — Solo NPM expone puertos al exterior.
+#  Todos los servicios se comunican por nombre de contenedor.
+# ==============================================================
+networks:
+  internal_network:
+    driver: bridge
+    name: ecosistema_net
