@@ -68,7 +68,7 @@ services:
   #         memory: 128M
   #         cpus: "0.25"
   #       reservations:
-          memory: 64M
+  # memory: 64M
 
   # ==========================================================
   #  2. BASE DE DATOS CENTRAL — MariaDB 10.11
